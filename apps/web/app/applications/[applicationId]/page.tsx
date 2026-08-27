@@ -1,21 +1,7 @@
-import { fetchApplication, formatStatus } from "../../../src/api";
+import { fetchApplication } from "../../../src/api";
+import { formatDate, formatMoney, formatStatus } from "../../../src/format";
 
 export const dynamic = "force-dynamic";
-
-function formatMoney(amountInCents: number, currency: string) {
-  return new Intl.NumberFormat("en-EG", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 0,
-  }).format(amountInCents / 100);
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en-EG", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
-}
 
 export default async function ApplicationPage({
   params,

@@ -1,4 +1,4 @@
-import type { ApplicationStatus, ApplicationView } from "@assessment/contracts";
+import type { ApplicationView } from "@assessment/contracts";
 
 const apiUrl = process.env.API_URL ?? "http://127.0.0.1:3001";
 const demoCustomerId = process.env.DEMO_CUSTOMER_ID ?? "cus_amina_001";
@@ -16,12 +16,4 @@ export async function fetchApplication(
   }
 
   return (await response.json()) as ApplicationView;
-}
-
-export function formatStatus(status: ApplicationStatus): string {
-  return status
-    .toLowerCase()
-    .split("_")
-    .map((part) => part[0]?.toUpperCase() + part.slice(1))
-    .join(" ");
 }

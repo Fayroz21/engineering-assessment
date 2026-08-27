@@ -1,12 +1,12 @@
-import { statusEventSchema } from "@assessment/contracts";
+import { statusEventSchema, type StatusEventInput } from "@assessment/contracts";
 import { prisma, type PrismaClient } from "@assessment/database";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import {
-  ApplicationNotFoundError,
-  getApplication,
+  getApplicationForCustomer,
   recordStatusEvent,
 } from "./application-service.js";
+import { requireCustomer, requirePartner, validateBody } from "./guards.js";
 
 interface BuildAppOptions {
   database?: PrismaClient;
@@ -19,57 +19,94 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   void app.register(cors, { origin: true });
 
+  // Backing store for the `requireCustomer` guard, the Fastify equivalent of
+  // an injected request-scoped identity.
+  app.decorateRequest("customerId", "");
+
   app.get("/health", async () => ({ status: "ok" }));
 
   app.get<{ Params: { applicationId: string } }>(
     "/v1/applications/:applicationId",
+    { preHandler: [requireCustomer] },
     async (request, reply) => {
-      const customerId = request.headers["x-customer-id"];
-      if (typeof customerId !== "string" || customerId.length === 0) {
-        return reply.code(401).send({ error: "customer identity is required" });
-      }
-
-      const application = await getApplication(
+      const application = await getApplicationForCustomer(
         database,
         request.params.applicationId,
+        request.customerId,
       );
 
+      // One response for "no such application" and for "not yours", so the API
+      // never discloses that an inaccessible application exists (DOMAIN.md:37).
       if (!application) {
-        return reply.code(404).send({ error: "application not found" });
+        return reply
+          .code(404)
+          .send({ outcome: "NOT_FOUND", error: "application not found" });
       }
 
       return application;
     },
   );
 
-  app.post<{ Params: { applicationId: string } }>(
+  app.post<{ Params: { applicationId: string }; Body: StatusEventInput }>(
     "/v1/applications/:applicationId/status-events",
+    { preHandler: [requirePartner, validateBody(statusEventSchema)] },
     async (request, reply) => {
-      const parsed = statusEventSchema.safeParse(request.body);
-      if (!parsed.success) {
-        return reply.code(400).send({
-          error: "invalid status event",
-          details: parsed.error.flatten(),
-        });
-      }
-
-      request.log.info(
-        { applicationId: request.params.applicationId, event: parsed.data },
-        "received partner status event",
+      const applicationId = request.params.applicationId;
+      const result = await recordStatusEvent(
+        database,
+        applicationId,
+        request.body,
       );
 
-      try {
-        const application = await recordStatusEvent(
-          database,
-          request.params.applicationId,
-          parsed.data,
-        );
-        return reply.code(202).send({ application });
-      } catch (error) {
-        if (error instanceof ApplicationNotFoundError) {
-          return reply.code(404).send({ error: "application not found" });
-        }
-        throw error;
+      // Identifiers and the outcome only. The free-text `reason` is customer
+      // content and does not belong in application logs.
+      request.log.info(
+        {
+          applicationId,
+          eventId: request.body.eventId,
+          status: request.body.status,
+          outcome: result.outcome,
+        },
+        "partner status event processed",
+      );
+
+      switch (result.outcome) {
+        // Recorded. History and notification are queued.
+        case "ACCEPTED":
+          return reply
+            .code(202)
+            .send({ outcome: result.outcome, application: result.application });
+
+        // Already applied exactly once. A safe retry, not an error: the
+        // partner should stop retrying and treat this as success.
+        case "DUPLICATE":
+          return reply
+            .code(200)
+            .send({ outcome: result.outcome, application: result.application });
+
+        // Superseded by a newer event. Retrying will never succeed.
+        case "STALE":
+          return reply.code(409).send({
+            outcome: result.outcome,
+            error: "event is older than the current application state",
+            application: result.application,
+          });
+
+        // Not a legal move in the documented lifecycle. Retrying will never
+        // succeed; this warrants an alert on the partner side.
+        case "INVALID_TRANSITION":
+          return reply.code(409).send({
+            outcome: result.outcome,
+            error: `cannot move from ${result.from} to ${result.to}`,
+            from: result.from,
+            to: result.to,
+            application: result.application,
+          });
+
+        case "NOT_FOUND":
+          return reply
+            .code(404)
+            .send({ outcome: result.outcome, error: "application not found" });
       }
     },
   );
